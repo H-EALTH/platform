@@ -1,0 +1,65 @@
+# release — valida il tag `<prodotto>-vX.Y.Z`, crea la Release GitHub con note dalle PR
+# e allega l'SBOM (syft) di ogni immagine. Rifiuta qualsiasi tag con altro formato.
+# Il prodotto lo chiama da un workflow con `on: push: tags: ['*-v*']`.
+# La Release va marcata immutabile (setting del repo "Immutable releases"): il tag non si sposta mai.
+name: release
+on:
+  workflow_call:
+    inputs:
+      product: { type: string, required: true }   # prefisso del tag, es. so-ulss2
+      # Immagini da cui generare l'SBOM, una per riga, con tag o digest.
+      # es. ghcr.io/h-ealth/sale-operatorie-ussl2/solver-api:so-ulss2-v1.2.0
+      images:  { type: string, default: "" }
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - name: Il tag deve essere <prodotto>-v<major>.<minor>.<patch>
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          re="^${{ inputs.product }}-v[0-9]+\.[0-9]+\.[0-9]+$"
+          echo "$tag" | grep -Eq "$re" || { echo "::error::tag '$tag' non conforme a $re"; exit 1; }
+
+  sbom:
+    needs: validate
+    if: inputs.images != ''
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: read }
+    steps:
+      - uses: docker/login-action@v3   # TODO: pinnare allo SHA (ADR 0002)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: anchore/sbom-action/download-syft@v0   # TODO: pinnare allo SHA (ADR 0002)
+      - name: SBOM per ogni immagine
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          mkdir -p sbom
+          echo "$IMAGES" | while read -r img; do
+            [ -z "$img" ] && continue
+            name=$(basename "${img%%[:@]*}")
+            syft "registry:$img" -o spdx-json > "sbom/${name}.spdx.json"
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom/, retention-days: 90 }
+
+  release:
+    needs: [validate, sbom]
+    if: always() && needs.validate.result == 'success' && needs.sbom.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: needs.sbom.result == 'success'
+        with: { name: sbom, path: sbom }
+      - name: Crea la Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          files=$(ls sbom/*.spdx.json 2>/dev/null || true)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME" $files

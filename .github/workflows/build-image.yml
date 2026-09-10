@@ -1,0 +1,49 @@
+# build-image — build + push su GHCR di UN servizio. Restituisce il digest: è l'identificativo
+# che finisce nel documento di rilascio su Drive.
+# Tag prodotti: `sha-<short>` sempre; se il push è un tag di rilascio (`<prodotto>-vX.Y.Z`), anche quello.
+# Il context di default è la radice del repo: i Dockerfile dei prodotti copiano anche libs/ condivise.
+name: build-image
+on:
+  workflow_call:
+    inputs:
+      path:       { type: string, required: true }   # es. services/solver-api (contiene il Dockerfile)
+      image:      { type: string, required: true }   # es. ghcr.io/h-ealth/sale-operatorie-ussl2/solver-api
+      context:    { type: string, default: "." }
+      dockerfile: { type: string, default: "" }      # default: <path>/Dockerfile
+    outputs:
+      digest:
+        description: "Digest dell'immagine pubblicata (sha256:...)"
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3   # TODO: pinnare allo SHA (ADR 0002)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5   # TODO: pinnare allo SHA (ADR 0002)
+        with:
+          images: ${{ inputs.image }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=tag
+      - uses: docker/setup-buildx-action@v3   # TODO: pinnare allo SHA (ADR 0002)
+      - id: push
+        uses: docker/build-push-action@v6   # TODO: pinnare allo SHA (ADR 0002)
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile != '' && inputs.dockerfile || format('{0}/Dockerfile', inputs.path) }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: echo "digest=${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
