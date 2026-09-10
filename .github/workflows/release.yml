@@ -54,7 +54,7 @@ jobs:
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: needs.sbom.result == 'success'
         with: { name: sbom, path: sbom }
       - name: Crea la Release
