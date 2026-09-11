@@ -1,7 +1,9 @@
 # release — valida il tag <prodotto>-vX.Y.Z, risolve il digest di ogni componente dal registry,
 # aggiunge il tag di rilascio a ciascun artefatto, genera SBOM per le immagini e crea la Release
-# con la lista dei digest allegata. Non costruisce e non ripubblica nulla (ADR 0001, 0002).
+# con la lista dei digest nelle note e allegata. Non costruisce e non ripubblica nulla (ADR 0001, 0002).
 # Il prodotto lo chiama da un workflow con `on: push: tags: ['*-v*']`.
+# Il tag può nascere da riga di comando (la Release la crea questo workflow) oppure dalla UI web
+# "Create a new release" (la Release esiste già: il workflow la completa con digest e allegati).
 # I digest si risolvono dal tag `sha-<short>` del commit taggato: se un componente manca,
 # quel commit non è passato dalla CI di main e il rilascio si ferma.
 name: release
@@ -77,10 +79,22 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: release-${{ github.sha }}
-      - name: "Crea la Release con note dalle PR e allegati"
+      - name: "Crea o completa la Release: digest nelle note, artifacts.txt e SBOM allegati"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           files="artifacts.txt $(ls sbom/*.spdx.json 2>/dev/null || true)"
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --generate-notes --title "$GITHUB_REF_NAME" $files
+          { echo "## Artefatti (ADR 0001: il prodotto è la lista dei digest)"; sed 's/^/- `/; s/$/`/' artifacts.txt; } > artefatti.md
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release già esistente (creata dalla UI web): la completo"
+            gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body > note.md
+            printf '\n\n' >> note.md; cat artefatti.md >> note.md
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file note.md
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber $files \
+              || echo "::warning::allegati non caricati (Release immutabile?): restano tra gli artifact del run per 90 giorni"
+          else
+            echo "Nessuna Release: la creo dal tag"
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$GITHUB_REF_NAME" --generate-notes --notes-file artefatti.md $files
+          fi
