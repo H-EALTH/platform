@@ -28,7 +28,7 @@ jobs:
           path: ${{ inputs.path }}
 
       - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6   # v1.2.4
-        with: { version: 1.3.4 }
+        with: { version: 1.3.0 }   # la più recente conosciuta da setup-oras v1.2.4 (lista con checksum interna)
 
       - name: "Login GHCR con il token del run (ADR 0002: nessun secret dedicato)"
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin

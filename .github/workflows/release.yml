@@ -31,7 +31,7 @@ jobs:
     permissions: { contents: read, packages: write }
     steps:
       - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6   # v1.2.4
-        with: { version: 1.3.4 }
+        with: { version: 1.3.0 }   # la più recente conosciuta da setup-oras v1.2.4 (lista con checksum interna)
       - uses: anchore/sbom-action/download-syft@006b7ce8314066bdf1765b4500370d40fa6917a3   # v0.24.2
         with: { syft-version: v1.51.1 }
 
