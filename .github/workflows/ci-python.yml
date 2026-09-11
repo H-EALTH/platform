@@ -1,0 +1,50 @@
+# ci-python — verifica UN componente Python: ruff (lint + formato) e pytest con report JUnit.
+# Non costruisce e non pubblica: l'immagine la fa `build-image`, chiamato dal ci.yml del
+# prodotto dopo questo job. Ogni stazione fa una cosa sola (ADR 0001).
+# Convenzioni attese nella cartella del componente:
+#   requirements.txt (opzionale), requirements-dev.txt (ruff, pytest), pyproject.toml (config ruff), tests/
+name: ci-python
+on:
+  workflow_call:
+    inputs:
+      path:           { type: string, required: true }   # es. services/hello
+      python-version: { type: string, default: "3.12" }
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    defaults:
+      run:
+        working-directory: ${{ inputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.path }}/requirements*.txt
+
+      - name: Dipendenze
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements-dev.txt
+
+      - name: Lint e formato (ruff)
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Test (pytest, report JUnit)
+        run: pytest --junitxml=junit.xml
+
+      - id: n
+        if: always()
+        run: echo "name=$(basename "$PWD")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ steps.n.outputs.name }}
+          path: ${{ inputs.path }}/junit.xml
+          retention-days: 30
