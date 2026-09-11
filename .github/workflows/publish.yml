@@ -1,0 +1,58 @@
+# publish — deposita una cartella su GHCR come artefatto OCI e restituisce il digest.
+# Non costruisce nulla: riceve un risultato già pronto, caricato come artifact
+# `<type>-<sha>` dal ci-<genere> che lo chiama. Vale per qualunque genere (ADR 0001).
+# Pubblica con il solo tag `sha-<short>`; il tag di rilascio lo aggiunge `release` (ADR 0002).
+# Pinning delle action: ADR 0003.
+name: publish
+on:
+  workflow_call:
+    inputs:
+      path: { type: string, required: true }   # cartella da pubblicare, es. firmware/gateway/out
+      ref:  { type: string, required: true }   # es. ghcr.io/h-ealth/<prodotto>/<componente>
+      type: { type: string, required: true }   # genere: firmware | model | dist
+    outputs:
+      digest:
+        description: "sha256:... dell'artefatto pubblicato"
+        value: ${{ jobs.publish.outputs.digest }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.type }}-${{ github.sha }}
+          path: ${{ inputs.path }}
+
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6   # v1.2.4
+        with: { version: 1.3.4 }
+
+      - name: "Login GHCR con il token del run (ADR 0002: nessun secret dedicato)"
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - id: push
+        name: Push dell'artefatto e cattura del digest
+        working-directory: ${{ inputs.path }}
+        env:
+          REF:  ${{ inputs.ref }}
+          TYPE: ${{ inputs.type }}
+        run: |
+          tag="sha-${GITHUB_SHA::7}"
+
+          digest=$(oras push "${REF}:${tag}" . \
+            --artifact-type "application/vnd.h-ealth.${TYPE}" \
+            --annotation "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --annotation "h-ealth.type=${TYPE}" \
+            --annotation "h-ealth.run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --format go-template='{{.digest}}')
+
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### publish · ${TYPE}"
+            echo "**${REF}** → \`${digest}\`"
+            echo "tag: \`${tag}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

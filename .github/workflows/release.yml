@@ -1,65 +1,86 @@
-# release — valida il tag `<prodotto>-vX.Y.Z`, crea la Release GitHub con note dalle PR
-# e allega l'SBOM (syft) di ogni immagine. Rifiuta qualsiasi tag con altro formato.
+# release — valida il tag <prodotto>-vX.Y.Z, risolve il digest di ogni componente dal registry,
+# aggiunge il tag di rilascio a ciascun artefatto, genera SBOM per le immagini e crea la Release
+# con la lista dei digest allegata. Non costruisce e non ripubblica nulla (ADR 0001, 0002).
 # Il prodotto lo chiama da un workflow con `on: push: tags: ['*-v*']`.
-# La Release va marcata immutabile (setting del repo "Immutable releases"): il tag non si sposta mai.
+# I digest si risolvono dal tag `sha-<short>` del commit taggato: se un componente manca,
+# quel commit non è passato dalla CI di main e il rilascio si ferma.
 name: release
 on:
   workflow_call:
     inputs:
-      product: { type: string, required: true }   # prefisso del tag, es. so-ulss2
-      # Immagini da cui generare l'SBOM, una per riga, con tag o digest.
-      # es. ghcr.io/h-ealth/sale-operatorie-ussl2/solver-api:so-ulss2-v1.2.0
-      images:  { type: string, default: "" }
+      product: { type: string, required: true }   # prefisso del tag, es. monitor-letto
+      refs:    { type: string, required: true }   # un componente per riga: ghcr.io/h-ealth/<prodotto>/<componente>
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    permissions: { contents: read }
     steps:
-      - name: Il tag deve essere <prodotto>-v<major>.<minor>.<patch>
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          re="^${{ inputs.product }}-v[0-9]+\.[0-9]+\.[0-9]+$"
-          echo "$tag" | grep -Eq "$re" || { echo "::error::tag '$tag' non conforme a $re"; exit 1; }
-
-  sbom:
-    needs: validate
-    if: inputs.images != ''
-    runs-on: ubuntu-latest
-    permissions: { contents: read, packages: read }
-    steps:
-      - uses: docker/login-action@v3   # TODO: pinnare allo SHA (ADR 0002)
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: anchore/sbom-action/download-syft@v0   # TODO: pinnare allo SHA (ADR 0002)
-      - name: SBOM per ogni immagine
+      - name: "Il tag deve essere <prodotto>-v<major>.<minor>.<patch>"
         env:
-          IMAGES: ${{ inputs.images }}
+          PRODUCT: ${{ inputs.product }}
+        run: |
+          re="^${PRODUCT}-v[0-9]+\.[0-9]+\.[0-9]+$"
+          echo "$GITHUB_REF_NAME" | grep -Eq "$re" \
+            || { echo "::error::tag '$GITHUB_REF_NAME' non conforme a $re"; exit 1; }
+
+  resolve:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6   # v1.2.4
+        with: { version: 1.3.4 }
+      - uses: anchore/sbom-action/download-syft@006b7ce8314066bdf1765b4500370d40fa6917a3   # v0.24.2
+        with: { syft-version: v1.51.1 }
+
+      - name: "Login GHCR con il token del run (ADR 0002)"
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: "Risolvi sha-<short> in digest e aggiungi il tag di rilascio"
+        env:
+          REFS: ${{ inputs.refs }}
+        run: |
+          short="${GITHUB_SHA::7}"
+          : > artifacts.txt
+          while read -r ref; do
+            [ -z "$ref" ] && continue
+            digest=$(oras resolve "${ref}:sha-${short}") \
+              || { echo "::error::${ref}:sha-${short} non esiste: il commit taggato non è passato dalla CI"; exit 1; }
+            oras tag "${ref}@${digest}" "$GITHUB_REF_NAME"   # ADR 0002: il tag si aggiunge, l'identità resta il digest
+            echo "${ref}@${digest}" >> artifacts.txt
+          done <<< "$REFS"
+          { echo "### ${GITHUB_REF_NAME}"; sed 's/^/- `/; s/$/`/' artifacts.txt; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "SBOM delle sole immagini container"
         run: |
           mkdir -p sbom
-          echo "$IMAGES" | while read -r img; do
-            [ -z "$img" ] && continue
-            name=$(basename "${img%%[:@]*}")
-            syft "registry:$img" -o spdx-json > "sbom/${name}.spdx.json"
-          done
+          while read -r art; do
+            # un artefatto pubblicato con oras ha artifactType; un'immagine Docker no
+            if [ -n "$(oras manifest fetch "$art" | jq -r '.artifactType // empty')" ]; then continue; fi
+            name=$(basename "${art%%@*}")
+            syft "registry:${art}" -o spdx-json > "sbom/${name}.spdx.json"
+          done < artifacts.txt
+
       - uses: actions/upload-artifact@v4
-        with: { name: sbom, path: sbom/, retention-days: 90 }
+        with:
+          name: release-${{ github.sha }}
+          path: |
+            artifacts.txt
+            sbom/
+          retention-days: 90
 
   release:
-    needs: [validate, sbom]
-    if: always() && needs.validate.result == 'success' && needs.sbom.result != 'failure'
+    needs: resolve
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        if: needs.sbom.result == 'success'
-        with: { name: sbom, path: sbom }
-      - name: Crea la Release
+        with:
+          name: release-${{ github.sha }}
+      - name: "Crea la Release con note dalle PR e allegati"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          files=$(ls sbom/*.spdx.json 2>/dev/null || true)
-          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME" $files
+          files="artifacts.txt $(ls sbom/*.spdx.json 2>/dev/null || true)"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --generate-notes --title "$GITHUB_REF_NAME" $files
