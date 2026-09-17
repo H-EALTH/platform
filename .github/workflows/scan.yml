@@ -1,0 +1,54 @@
+# scan — verifica di sicurezza di UN componente con Trivy: segreti, misconfig del Dockerfile
+# e vulnerabilità nelle dipendenze (filesystem); se `image` è dato, anche l'immagine pubblicata.
+# Fallisce su CRITICAL (regola 4 della pagina Sicurezza). Non costruisce e non pubblica (ADR 0001).
+# Rischi accettati: <path>/.trivyignore, ogni riga con l'id CVE e il riferimento all'anomalia HE-SOP-006.
+# Pinning delle action: ADR 0003.
+name: scan
+on:
+  workflow_call:
+    inputs:
+      path:     { type: string, required: true }   # es. services/hello
+      image:    { type: string, default: "" }      # es. ghcr.io/h-ealth/hello-web/hello@sha256:...
+      severity: { type: string, default: "CRITICAL" }   # lista Trivy, es. HIGH,CRITICAL (fa fallire il job)
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: read }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ".trivyignore del componente (vuoto se assente)"
+        env: { P: "${{ inputs.path }}" }
+        run: touch "$P/.trivyignore"
+
+      - name: Filesystem (vuln, segreti, misconfig)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25   # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.path }}
+          scanners: vuln,secret,misconfig
+          severity: ${{ inputs.severity }}
+          exit-code: "1"
+          ignore-unfixed: true
+          trivyignores: ${{ inputs.path }}/.trivyignore
+          format: table
+
+      - if: inputs.image != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f   # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Immagine pubblicata
+        if: inputs.image != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25   # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.image }}
+          severity: ${{ inputs.severity }}
+          exit-code: "1"
+          ignore-unfixed: true
+          trivyignores: ${{ inputs.path }}/.trivyignore
+          format: table
