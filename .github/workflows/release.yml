@@ -1,11 +1,17 @@
 # release — valida il tag <prodotto>-vX.Y.Z, risolve il digest di ogni componente dal registry,
-# aggiunge il tag di rilascio a ciascun artefatto, genera SBOM per le immagini e crea la Release
-# con la lista dei digest nelle note e allegata. Non costruisce e non ripubblica nulla (ADR 0001, 0002).
-# Il prodotto lo chiama da un workflow con `on: push: tags: ['*-v*']`.
+# aggiunge il tag di rilascio a ciascun artefatto, genera SBOM per le immagini, recupera le prove
+# (Trivy, JUnit) dal run `ci` del commit taggato e crea la Release con la lista dei digest nelle
+# note e le prove allegate. Non costruisce e non ripubblica nulla (ADR 0001, 0002).
+# Il prodotto lo chiama da un workflow con `on: push: tags: ['*-v*']` e permessi
+# `contents: write, packages: write, actions: read`.
 # Il tag può nascere da riga di comando (la Release la crea questo workflow) oppure dalla UI web
 # "Create a new release" (la Release esiste già: il workflow la completa con digest e allegati).
 # I digest si risolvono dal tag `sha-<short>` del commit taggato: se un componente manca,
 # quel commit non è passato dalla CI di main e il rilascio si ferma.
+# Le prove si recuperano dal run `ci` verde dello stesso commit: se non esiste, o i suoi artifact
+# sono scaduti, il rilascio si ferma. Ogni prova è allegata in tre formati: JSON originale (o XML
+# per JUnit), tabella `.txt` leggibile, `.csv` importabile. Cartelle: security/, SBOM/, tests/,
+# allegate alla Release come zip perché gli asset di una Release non hanno cartelle.
 name: release
 on:
   workflow_call:
@@ -28,7 +34,7 @@ jobs:
   resolve:
     needs: validate
     runs-on: ubuntu-latest
-    permissions: { contents: read, packages: write }
+    permissions: { contents: read, packages: write, actions: read }
     steps:
       - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6   # v1.2.4
         with: { version: 1.3.0 }   # la più recente conosciuta da setup-oras v1.2.4 (lista con checksum interna)
@@ -55,20 +61,135 @@ jobs:
 
       - name: "SBOM delle sole immagini container"
         run: |
-          mkdir -p sbom
+          mkdir -p sbom-raw   # "sbom-raw" e non "sbom": su filesystem case-insensitive collide con SBOM/
           while read -r art; do
             # un artefatto pubblicato con oras ha artifactType; un'immagine Docker no
             if [ -n "$(oras manifest fetch "$art" | jq -r '.artifactType // empty')" ]; then continue; fi
             name=$(basename "${art%%@*}")
-            syft "registry:${art}" -o spdx-json > "sbom/${name}.spdx.json"
+            syft "registry:${art}" -o spdx-json > "sbom-raw/${name}.spdx.json"
           done < artifacts.txt
+
+      - name: "Recupera le prove dal run ci verde del commit taggato (obbligatorio)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci --commit "$GITHUB_SHA" \
+                     --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          [ -n "$run_id" ] \
+            || { echo "::error::nessun run ci verde per ${GITHUB_SHA::7}: il commit taggato non è passato dalla CI di main"; exit 1; }
+          echo "run ci: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          mkdir -p evidence
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" -D evidence -p 'scan-*' -p 'junit-*' \
+            || { echo "::error::artifact scan-*/junit-* non trovati nel run ${run_id}: scaduti (90/30 giorni) o mai prodotti"; exit 1; }
+          ls evidence/*/trivy-*.json >/dev/null 2>&1 || { echo "::error::nessun report Trivy nel run ${run_id}"; exit 1; }
+          ls evidence/*/junit.xml    >/dev/null 2>&1 || { echo "::error::nessun report JUnit nel run ${run_id}"; exit 1; }
+          echo "run_id=${run_id}" >> "$GITHUB_ENV"
+
+      - name: "Prove in tre formati: security/ (Trivy), SBOM/ (SPDX), tests/ (JUnit)"
+        run: |
+          python3 - <<'PY'
+          import csv, json, pathlib, xml.etree.ElementTree as ET
+
+          EV = pathlib.Path("evidence")
+          SEC, SBOM, TESTS = pathlib.Path("security"), pathlib.Path("SBOM"), pathlib.Path("tests")
+          for d in (SEC, SBOM, TESTS): d.mkdir(exist_ok=True)
+
+          def table(header, rows):
+              w = [max(len(str(r[i])) for r in [header, *rows]) for i in range(len(header))]
+              line = lambda r: "  ".join(str(c).ljust(w[i]) for i, c in enumerate(r)).rstrip()
+              return "\n".join([line(header), line(["-" * x for x in w]), *map(line, rows)])
+
+          def emit(base, head, header, rows, empty):
+              with open(f"{base}.csv", "w", newline="", encoding="utf-8") as f:
+                  wr = csv.writer(f); wr.writerow(header); wr.writerows(rows)
+              body = table(header, rows) if rows else empty
+              pathlib.Path(f"{base}.txt").write_text("\n".join(head) + "\n\n" + body + "\n", encoding="utf-8")
+
+          # --- Trivy: evidence/scan-<comp>[-image]/trivy-{fs,image}.json -> security/<comp>-trivy-<kind>.{json,txt,csv}
+          for src in sorted(EV.glob("scan-*/trivy-*.json")):
+              comp = src.parent.name.removeprefix("scan-").removesuffix("-image")
+              kind = src.stem.removeprefix("trivy-")
+              base = SEC / f"{comp}-trivy-{kind}"
+              base.with_suffix(".json").write_bytes(src.read_bytes())
+              rep = json.load(open(src, encoding="utf-8"))
+              rows, ok, ko = [], 0, 0
+              for r in rep.get("Results") or []:
+                  t = r.get("Target", "")
+                  for v in r.get("Vulnerabilities") or []:
+                      rows.append([t, "vulnerability", v.get("Severity", ""), v.get("VulnerabilityID", ""), v.get("PkgName", ""),
+                                   v.get("InstalledVersion", ""), v.get("FixedVersion", ""), v.get("Status", ""),
+                                   (v.get("Title") or "")[:80], v.get("PrimaryURL", "")])
+                  for s in r.get("Secrets") or []:
+                      rows.append([t, "secret", s.get("Severity", ""), s.get("RuleID", ""), "", "", "",
+                                   f"riga {s.get('StartLine')}", s.get("Title", ""), ""])
+                  for m in r.get("Misconfigurations") or []:
+                      rows.append([t, "misconfig", m.get("Severity", ""), m.get("ID", ""), "", "", "",
+                                   m.get("Status", ""), (m.get("Title") or "")[:80], m.get("PrimaryURL", "")])
+                  ms = r.get("MisconfSummary") or {}
+                  ok += ms.get("Successes", 0); ko += ms.get("Failures", 0)
+              sev = {}
+              for r in rows: sev[r[2]] = sev.get(r[2], 0) + 1
+              os_ = (rep.get("Metadata") or {}).get("OS") or {}
+              head = [f"Trivy {rep.get('CreatedAt', '')}  {rep.get('ArtifactName', '')}  ({rep.get('ArtifactType', '')})"]
+              if os_: head.append(f"OS: {os_.get('Family', '')} {os_.get('Name', '')}".rstrip())
+              head.append("finding per severità: " + (", ".join(f"{k}={v}" for k, v in sorted(sev.items())) or "nessuno"))
+              if ok or ko: head.append(f"controlli misconfig: {ok} passati, {ko} falliti")
+              emit(base, head, ["target", "kind", "severity", "id", "package", "installed", "fixed", "status", "title", "url"],
+                   rows, "(nessun finding)")
+
+          # --- SBOM: sbom-raw/<name>.spdx.json -> SBOM/<name>.spdx.json + <name>-sbom.{txt,csv}
+          for src in sorted(pathlib.Path("sbom-raw").glob("*.spdx.json")):
+              name = src.name.removesuffix(".spdx.json")
+              (SBOM / src.name).write_bytes(src.read_bytes())
+              doc = json.load(open(src, encoding="utf-8"))
+              rows = []
+              for p in doc.get("packages", []):
+                  purl = next((e["referenceLocator"] for e in p.get("externalRefs", []) if e.get("referenceType") == "purl"), "")
+                  ptype = purl.split("/")[0].removeprefix("pkg:") if purl else ""
+                  rows.append([ptype, p.get("name", ""), p.get("versionInfo", ""), p.get("supplier", ""),
+                               p.get("licenseConcluded", ""), purl])
+              rows = sorted({tuple(r) for r in rows}, key=lambda r: (r[0], r[1].lower()))   # syft può ripetere lo stesso package
+              ci = doc.get("creationInfo", {})
+              head = [f"SBOM {doc.get('spdxVersion', '')}  {doc.get('name', '')}",
+                      f"generata {ci.get('created', '')} da {', '.join(ci.get('creators', []))}",
+                      f"{len(rows)} package"]
+              emit(SBOM / f"{name}-sbom", head, ["type", "name", "version", "supplier", "license", "purl"], rows, "(nessun package)")
+
+          # --- JUnit: evidence/junit-<comp>/junit.xml -> tests/<comp>-junit.{xml,json,txt,csv}
+          for src in sorted(EV.glob("junit-*/junit.xml")):
+              comp = src.parent.name.removeprefix("junit-")
+              base = TESTS / f"{comp}-junit"
+              base.with_suffix(".xml").write_bytes(src.read_bytes())
+              tot = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+              rows = []
+              for ts in ET.parse(src).getroot().iter("testsuite"):
+                  for k in tot: tot[k] += int(ts.get(k, 0))
+                  for tc in ts.findall("testcase"):
+                      res = ("FAIL" if tc.find("failure") is not None else "ERROR" if tc.find("error") is not None
+                             else "SKIP" if tc.find("skipped") is not None else "PASS")
+                      rows.append([ts.get("name", ""), tc.get("classname", ""), tc.get("name", ""), res, tc.get("time", "")])
+              header = ["suite", "classname", "test", "result", "time_s"]
+              base.with_suffix(".json").write_text(json.dumps(
+                  {"component": comp, "summary": tot, "tests": [dict(zip(header, r)) for r in rows]}, indent=2), encoding="utf-8")
+              emit(base, [f"JUnit {comp}  " + "  ".join(f"{k}={v}" for k, v in tot.items())], header, rows, "(nessun test)")
+          PY
+          zip -qr security.zip security && zip -qr SBOM.zip SBOM && zip -qr tests.zip tests
+          {
+            echo "### prove dal run ci ${run_id}"
+            for f in security/*.txt SBOM/*.txt tests/*.txt; do echo "- \`$f\`: $(head -1 "$f")"; done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.sha }}
           path: |
             artifacts.txt
-            sbom/
+            security/
+            SBOM/
+            tests/
+            security.zip
+            SBOM.zip
+            tests.zip
           retention-days: 90
 
   release:
@@ -79,12 +200,18 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: release-${{ github.sha }}
-      - name: "Crea o completa la Release: digest nelle note, artifacts.txt e SBOM allegati"
+      - name: "Crea o completa la Release: digest nelle note, artifacts.txt e prove allegate"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          files="artifacts.txt $(ls sbom/*.spdx.json 2>/dev/null || true)"
-          { echo "## Artefatti (ADR 0001: il prodotto è la lista dei digest)"; sed 's/^/- `/; s/$/`/' artifacts.txt; } > artefatti.md
+          files="artifacts.txt security.zip SBOM.zip tests.zip"
+          {
+            echo "## Artefatti (ADR 0001: il prodotto è la lista dei digest)"; sed 's/^/- `/; s/$/`/' artifacts.txt
+            echo; echo "## Prove"
+            echo "- \`security.zip\`: report Trivy (sorgenti e immagine) in JSON, tabella e CSV"
+            echo "- \`SBOM.zip\`: SBOM SPDX delle immagini in JSON, tabella e CSV"
+            echo "- \`tests.zip\`: report JUnit in XML, JSON, tabella e CSV"
+          } > artefatti.md
 
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release già esistente (creata dalla UI web): la completo"
@@ -92,7 +219,7 @@ jobs:
             printf '\n\n' >> note.md; cat artefatti.md >> note.md
             gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file note.md
             gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber $files \
-              || echo "::warning::allegati non caricati (Release immutabile?): restano tra gli artifact del run per 90 giorni"
+              || { echo "::error::allegati non caricati (Release immutabile?): una Release senza prove non è valida"; exit 1; }
           else
             echo "Nessuna Release: la creo dal tag"
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
