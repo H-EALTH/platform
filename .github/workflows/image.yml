@@ -1,0 +1,40 @@
+# image — catena immagine di UN componente: build-image e poi scan dell'immagine appena pubblicata.
+# Esiste perché il prodotto la chiama con `strategy.matrix` (un'esecuzione per componente): un job
+# con matrix espone un solo valore per output (vince l'ultima esecuzione), quindi il digest non può
+# passare da un job matrix del prodotto a un altro senza mescolare i componenti. Qui il digest resta
+# dentro la catena del suo componente: `scan` riceve sempre quello prodotto dal proprio `build`.
+# Non aggiunge logica: compone `build-image` e `scan` con gli stessi input (ADR 0001).
+# Le chiamate interne pinnano il tag completo di platform, come fanno i prodotti (ADR 0003):
+# a ogni rilascio di platform va aggiornato insieme al tag.
+name: image
+on:
+  workflow_call:
+    inputs:
+      path:       { type: string, required: true }   # es. components/backend
+      image:      { type: string, required: true }   # es. ghcr.io/h-ealth/<prodotto>/backend (senza tag né digest)
+      context:    { type: string, default: "." }
+      dockerfile: { type: string, default: "" }      # default: <path>/Dockerfile
+      severity:   { type: string, default: "CRITICAL" }
+    outputs:
+      digest:
+        description: "sha256:... dell'immagine pubblicata e scansionata"
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    permissions: { contents: read, packages: write }
+    uses: H-EALTH/platform/.github/workflows/build-image.yml@v0.3.0
+    with:
+      path:       ${{ inputs.path }}
+      image:      ${{ inputs.image }}
+      context:    ${{ inputs.context }}
+      dockerfile: ${{ inputs.dockerfile }}
+
+  scan:
+    needs: build
+    permissions: { contents: read, packages: read }
+    uses: H-EALTH/platform/.github/workflows/scan.yml@v0.3.0
+    with:
+      path:     ${{ inputs.path }}
+      image:    ${{ inputs.image }}@${{ needs.build.outputs.digest }}
+      severity: ${{ inputs.severity }}
