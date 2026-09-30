@@ -9,7 +9,7 @@ name: scan
 on:
   workflow_call:
     inputs:
-      path:     { type: string, required: true }   # es. services/hello
+      path:     { type: string, required: true }   # es. components/hello
       image:    { type: string, default: "" }      # es. ghcr.io/h-ealth/hello-web/hello@sha256:...
       severity: { type: string, default: "CRITICAL" }   # lista Trivy, es. HIGH,CRITICAL (fa fallire il job)
 
