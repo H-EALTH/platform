@@ -4,8 +4,9 @@
 # passare da un job matrix del prodotto a un altro senza mescolare i componenti. Qui il digest resta
 # dentro la catena del suo componente: `scan` riceve sempre quello prodotto dal proprio `build`.
 # Non aggiunge logica: compone `build-image` e `scan` con gli stessi input (ADR 0001).
-# Le chiamate interne pinnano il tag completo di platform, come fanno i prodotti (ADR 0003):
-# a ogni rilascio di platform va aggiornato insieme al tag.
+# Le chiamate interne pinnano il tag completo di platform, come fanno i prodotti (ADR 0003), e
+# sono lo stesso tag del rilascio che le contiene: a ogni rilascio si aggiornano prima di taggare
+# (il riferimento si risolve quando il workflow gira, quindi il tag può citare sé stesso).
 name: image
 on:
   workflow_call:
@@ -23,7 +24,7 @@ on:
 jobs:
   build:
     permissions: { contents: read, packages: write }
-    uses: H-EALTH/platform/.github/workflows/build-image.yml@v0.3.0
+    uses: H-EALTH/platform/.github/workflows/build-image.yml@v0.2.5
     with:
       path:       ${{ inputs.path }}
       image:      ${{ inputs.image }}
@@ -33,7 +34,7 @@ jobs:
   scan:
     needs: build
     permissions: { contents: read, packages: read }
-    uses: H-EALTH/platform/.github/workflows/scan.yml@v0.3.0
+    uses: H-EALTH/platform/.github/workflows/scan.yml@v0.2.5
     with:
       path:     ${{ inputs.path }}
       image:    ${{ inputs.image }}@${{ needs.build.outputs.digest }}
