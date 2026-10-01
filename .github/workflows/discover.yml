@@ -1,0 +1,110 @@
+# discover — trova i componenti di un prodotto dai loro manifest `component.yaml` e verifica le
+# convenzioni. Il prodotto lo chiama come primo job di `ci.yml` e di `release.yml`: gli altri job
+# girano in `strategy.matrix` sulle liste che restituisce.
+# Un componente è una cartella che contiene `component.yaml`, a qualunque profondità tranne la
+# radice del repo: la struttura delle cartelle la decide il prodotto, platform non la presuppone.
+# Il manifest dichiara il genere (`kind`), che sceglie la stazione di verifica e il tipo di
+# artefatto. Il contratto resta componente → artefatto OCI → digest (ADR 0001).
+#   kind: python   → verify-python, immagine container (image)
+# Il chiamante passa in `kinds` i generi per cui ha un job: un manifest di un genere che il
+# prodotto non gestisce fa fallire discover invece di essere saltato in silenzio.
+# Nome del componente = basename della cartella: valido per GHCR e unico nel repo, perché è anche
+# il suffisso degli artifact `scan-<nome>` e `junit-<nome>` che `release` abbina ai componenti.
+# Non verifica il codice, non costruisce e non pubblica (ADR 0001).
+name: discover
+on:
+  workflow_call:
+    inputs:
+      kinds: { type: string, required: true }   # generi gestiti dal chiamante, separati da spazio: es. "python"
+    outputs:
+      python:
+        description: 'componenti python in JSON, es. [{"name":"backend","path":"components/backend"}]'
+        value: ${{ jobs.discover.outputs.python }}
+      refs:
+        description: "un ref per riga, tutti i generi: ghcr.io/h-ealth/<repo>/<nome>"
+        value: ${{ jobs.discover.outputs.refs }}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    outputs:
+      python: ${{ steps.list.outputs.python }}
+      refs:   ${{ steps.list.outputs.refs }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: list
+        name: "Leggi i component.yaml e verifica le convenzioni"
+        env:
+          KINDS:  ${{ inputs.kinds }}
+          PREFIX: ghcr.io/h-ealth/${{ github.event.repository.name }}
+        run: |
+          # File obbligatori per genere. Un genere nuovo è una riga qui, una stazione verify-<genere>
+          # e un output in più di questo workflow.
+          declare -A REQUIRED=(
+            [python]="Dockerfile pyproject.toml"
+          )
+
+          err=0
+          fail() { echo "::error file=$1::$2"; err=1; }
+
+          read -ra kinds <<< "$KINDS"
+          [ ${#kinds[@]} -gt 0 ] || { echo "::error::input kinds vuoto"; exit 1; }
+          for k in "${kinds[@]}"; do
+            [ -n "${REQUIRED[$k]+x}" ] \
+              || { echo "::error::kinds: genere '$k' sconosciuto a platform (noti: ${!REQUIRED[*]})"; exit 1; }
+          done
+
+          # git ls-files: contano solo i file versionati, non quelli generati o ignorati
+          mapfile -d '' -t manifests < <(git ls-files -z -- ':(glob)**/component.yaml')
+          [ ${#manifests[@]} -gt 0 ] || { echo "::error::nessun component.yaml nel repository"; exit 1; }
+
+          components='[]'
+          declare -A seen
+          for m in "${manifests[@]}"; do
+            d=$(dirname "$m"); n=$(basename "$d")
+            [ "$d" != "." ] || { fail "$m" "component.yaml nella radice: un componente sta in una sottocartella"; continue; }
+            yq -e 'tag == "!!map"' "$m" > /dev/null 2>&1 \
+              || { fail "$m" "deve essere una mappa YAML, es. 'kind: python'"; continue; }
+
+            extra=$(yq -r 'keys | .[] | select(. != "kind")' "$m" | paste -sd, -)
+            [ -z "$extra" ] || fail "$m" "chiavi non riconosciute: ${extra}"
+
+            kind=$(yq -r '.kind | select(tag == "!!str")' "$m")
+            [ -n "$kind" ] || { fail "$m" "manca kind (stringa), es. 'kind: python'"; continue; }
+            [ -n "${REQUIRED[$kind]+x}" ] \
+              || { fail "$m" "kind '$kind' sconosciuto a platform (noti: ${!REQUIRED[*]})"; continue; }
+            [[ " ${kinds[*]} " == *" $kind "* ]] \
+              || { fail "$m" "kind '$kind' non gestito dal prodotto (kinds: ${kinds[*]}): manca il job nel suo ci.yml"; continue; }
+
+            [[ "$n" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
+              || fail "$m" "nome '$n' non valido per GHCR (minuscolo, cifre, . _ -)"
+            if [ -n "${seen[$n]+x}" ]; then
+              fail "$m" "nome '$n' già usato da ${seen[$n]}: il nome del componente è la cartella e deve essere unico"
+            else
+              seen[$n]=$d
+            fi
+            for f in ${REQUIRED[$kind]}; do
+              [ -f "$d/$f" ] || fail "$m" "manca $d/$f (obbligatorio per kind: $kind)"
+            done
+
+            components=$(jq -c --arg k "$kind" --arg n "$n" --arg p "$d" \
+              '. + [{kind: $k, name: $n, path: $p}]' <<< "$components")
+          done
+          [ "$err" -eq 0 ] || exit 1
+
+          for k in "${!REQUIRED[@]}"; do
+            echo "${k}=$(jq -c --arg k "$k" 'map(select(.kind == $k) | {name, path})' <<< "$components")" >> "$GITHUB_OUTPUT"
+          done
+          {
+            echo "refs<<EOF"
+            jq -r --arg p "$PREFIX" '.[] | "\($p)/\(.name)"' <<< "$components"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### componenti"
+            echo "| nome | kind | cartella |"
+            echo "|---|---|---|"
+            jq -r '.[] | "| `\(.name)` | \(.kind) | `\(.path)` |"' <<< "$components"
+          } >> "$GITHUB_STEP_SUMMARY"
