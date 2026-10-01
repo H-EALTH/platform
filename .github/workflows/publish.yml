@@ -27,7 +27,7 @@ jobs:
           name: ${{ inputs.type }}-${{ github.sha }}
           path: ${{ inputs.path }}
 
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6   # v1.2.4
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d   # v2.0.1
         with: { version: 1.3.0 }   # la più recente conosciuta da setup-oras v1.2.4 (lista con checksum interna)
 
       - name: "Login GHCR con il token del run (ADR 0002: nessun secret dedicato)"
