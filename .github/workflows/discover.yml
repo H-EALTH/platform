@@ -6,6 +6,7 @@
 # Il manifest dichiara il genere (`kind`), che sceglie la stazione di verifica e il tipo di
 # artefatto. Il contratto resta componente → artefatto OCI → digest (ADR 0001).
 #   kind: python   → verify-python, immagine container (image)
+#   kind: node     → verify-node, immagine container (image)
 # Il chiamante passa in `kinds` i generi per cui ha un job: un manifest di un genere che il
 # prodotto non gestisce fa fallire discover invece di essere saltato in silenzio.
 # Nome del componente = basename della cartella: valido per GHCR e unico nel repo, perché è anche
@@ -15,11 +16,14 @@ name: discover
 on:
   workflow_call:
     inputs:
-      kinds: { type: string, required: true }   # generi gestiti dal chiamante, separati da spazio: es. "python"
+      kinds: { type: string, required: true }   # generi gestiti dal chiamante, separati da spazio: es. "python node"
     outputs:
       python:
         description: 'componenti python in JSON, es. [{"name":"backend","path":"components/backend"}]'
         value: ${{ jobs.discover.outputs.python }}
+      node:
+        description: 'componenti node in JSON, es. [{"name":"frontend","path":"app/frontend"}]'
+        value: ${{ jobs.discover.outputs.node }}
       refs:
         description: "un ref per riga, tutti i generi: ghcr.io/h-ealth/<repo>/<nome>"
         value: ${{ jobs.discover.outputs.refs }}
@@ -30,6 +34,7 @@ jobs:
     permissions: { contents: read }
     outputs:
       python: ${{ steps.list.outputs.python }}
+      node:   ${{ steps.list.outputs.node }}
       refs:   ${{ steps.list.outputs.refs }}
     steps:
       - uses: actions/checkout@v7
@@ -44,6 +49,7 @@ jobs:
           # e un output in più di questo workflow.
           declare -A REQUIRED=(
             [python]="Dockerfile pyproject.toml"
+            [node]="Dockerfile package.json package-lock.json"
           )
 
           err=0

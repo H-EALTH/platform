@@ -1,0 +1,65 @@
+# verify-node — verifica UN componente Node (es. frontend TypeScript servito come file statici):
+# installazione riproducibile (npm ci), lint, controllo dei tipi, test con report JUnit e build.
+# Il build qui dice solo che il codice compila: l'immagine la fa `build-image` (via `image`),
+# chiamato dal ci.yml del prodotto dopo questo job, rifacendo il build nel Dockerfile del
+# componente. Ogni stazione fa una cosa sola (ADR 0001).
+# Convenzioni attese nella cartella del componente:
+#   package-lock.json (npm ci installa esattamente quello), package.json con gli script
+#   lint, typecheck, test, build; `npm test` scrive junit.xml nella cartella del componente
+#   (es. Vitest: reporters ['default', 'junit'] e outputFile { junit: 'junit.xml' }).
+name: verify-node
+on:
+  workflow_call:
+    inputs:
+      path:         { type: string, required: true }   # es. app/frontend
+      node-version: { type: string, default: "24" }
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    defaults:
+      run:
+        working-directory: ${{ inputs.path }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.path }}/package-lock.json
+
+      - name: Script obbligatori in package.json
+        env: { P: "${{ inputs.path }}" }
+        run: |
+          missing=$(jq -r '[("lint", "typecheck", "test", "build") as $s | select(.scripts[$s] == null) | $s] | join(" ")' package.json)
+          [ -z "$missing" ] || { echo "::error file=${P}/package.json::script mancanti: ${missing}"; exit 1; }
+
+      - name: Dipendenze (npm ci)
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Controllo dei tipi
+        run: npm run typecheck
+
+      - name: Test (report JUnit)
+        env: { P: "${{ inputs.path }}" }
+        run: |
+          npm test
+          [ -f junit.xml ] || { echo "::error file=${P}/package.json::npm test non ha scritto junit.xml nella cartella del componente"; exit 1; }
+
+      - name: Build
+        run: npm run build
+
+      - id: n
+        if: always()
+        run: echo "name=$(basename "$PWD")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: junit-${{ steps.n.outputs.name }}
+          path: ${{ inputs.path }}/junit.xml
+          retention-days: 30

@@ -14,7 +14,7 @@ Container Registry).
 
 ## Indice
 
-- [Repository `platform`](docs/README.md) (`v0.3.0`): principi, workflow riusabili e stato
+- [Repository `platform`](docs/README.md) (`v0.4.0`): principi, workflow riusabili e stato
   dell'enforcement. Per chi mantiene la piattaforma o scrive i workflow di un prodotto.
 - Un documento per flusso:
   - [CI del prodotto](docs/ci.md): componenti e manifest `component.yaml`, job su PR e `main`,
