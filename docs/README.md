@@ -1,6 +1,6 @@
 # Repository `platform`
 
-Versione di riferimento: `H-EALTH/platform@v0.3.0`
+Versione di riferimento: `H-EALTH/platform@v0.4.0`
 
 `platform` contiene i workflow riusabili che ogni prodotto H-EALTH chiama per verificare,
 costruire, pubblicare e rilasciare i propri componenti. È una catena di montaggio a stazioni: il
@@ -35,6 +35,7 @@ Tutti hanno `on: workflow_call`: non partono da soli, li chiama un prodotto con 
 |---|---|---|
 | `discover.yml` | trova i componenti dai `component.yaml` e ne verifica le convenzioni | CI, rilascio |
 | `verify-python.yml` | lint, formato e test di un componente Python | CI |
+| `verify-node.yml` | `npm ci`, lint, tipi, test e build di un componente Node | CI |
 | `scan.yml` | scansione Trivy di sorgenti e, se richiesto, dell'immagine | CI |
 | `build-image.yml` | costruisce e pubblica un'immagine su GHCR | CI (via `image`) |
 | `image.yml` | catena `build-image` → `scan` dell'immagine, per un componente | CI |

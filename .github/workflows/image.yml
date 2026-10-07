@@ -24,7 +24,7 @@ on:
 jobs:
   build:
     permissions: { contents: read, packages: write }
-    uses: H-EALTH/platform/.github/workflows/build-image.yml@v0.3.0
+    uses: H-EALTH/platform/.github/workflows/build-image.yml@v0.4.0
     with:
       path:       ${{ inputs.path }}
       image:      ${{ inputs.image }}
@@ -34,7 +34,7 @@ jobs:
   scan:
     needs: build
     permissions: { contents: read, packages: read }
-    uses: H-EALTH/platform/.github/workflows/scan.yml@v0.3.0
+    uses: H-EALTH/platform/.github/workflows/scan.yml@v0.4.0
     with:
       path:     ${{ inputs.path }}
       image:    ${{ inputs.image }}@${{ needs.build.outputs.digest }}
